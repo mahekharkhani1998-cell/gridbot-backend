@@ -1,7 +1,7 @@
 const CryptoJS = require("crypto-js");
 
 // Pad or truncate key to exactly 32 characters for AES-256
-const RAW_KEY = process.env.ENCRYPTION_KEY || "gridbot_default_key_32chars_pad0";
+const RAW_KEY = process.env.ENCRYPTION_KEY || "gridbot_default_32charkey_pad000";
 const KEY = RAW_KEY.padEnd(32, "0").slice(0, 32);
 
 function encrypt(obj) {
