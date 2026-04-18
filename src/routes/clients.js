@@ -32,7 +32,13 @@ router.post("/", auth, async (req, res) => {
       "INSERT INTO clients (name,broker,segment,note,credentials_enc) VALUES ($1,$2,$3,$4,$5) RETURNING id,name,broker,segment,note,active,created_at",
       [name, broker, segment || "NSE_EQ", note || "", enc]
     );
-    res.json({ ok: true, client: row });
+    const client = {
+      ...row,
+      credentials,
+      bots: 0, pnl: 0,
+      added: row.created_at ? new Date(row.created_at).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata",day:"2-digit",month:"short",year:"numeric"}) : "",
+    };
+    res.json({ ok: true, client });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -49,7 +55,14 @@ router.put("/:id", auth, async (req, res) => {
       "UPDATE clients SET name=$1,broker=$2,segment=$3,note=$4,credentials_enc=$5,active=$6 WHERE id=$7 RETURNING id,name,broker,segment,note,active",
       [name, broker, segment, note, enc, active !== undefined ? active : true, req.params.id]
     );
-    res.json({ ok: true, client: row });
+    const merged_creds = { ...oldCreds, ...credentials };
+    const client = {
+      ...row,
+      credentials: merged_creds,
+      bots: 0, pnl: 0,
+      added: "",
+    };
+    res.json({ ok: true, client });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
