@@ -19,11 +19,7 @@ const PORT = process.env.PORT || 4000;
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(cors({
-  origin: [
-    process.env.FRONTEND_URL,
-    "http://localhost:3000",
-    "http://localhost:5173",
-  ],
+  origin: true,
   credentials: true,
 }));
 app.use(express.json());
@@ -64,21 +60,16 @@ async function start() {
   try {
     await db.connect();
     logger.info("✓ Database connected");
-
     await db.migrate();
     logger.info("✓ Database migrated");
-
     scheduler.start();
     logger.info("✓ Scheduler started (token refresh 8:00 AM IST, script refresh 6:00 AM IST)");
-
     const server = app.listen(PORT, () => {
       const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
       logger.info(`✓ GridBot backend running on port ${PORT} | IST: ${ist}`);
     });
-
     wsServer.attach(server);
     logger.info("✓ WebSocket server attached");
-
   } catch (err) {
     logger.error("Failed to start server:", err);
     process.exit(1);
