@@ -1,50 +1,41 @@
 require("dotenv").config();
-const express    = require("express");
-const cors       = require("cors");
+const express = require("express");
+const cors = require("cors");
 const { logger } = require("./services/logger");
-const db         = require("./services/database");
-const scheduler  = require("./jobs/scheduler");
-const wsServer   = require("./services/websocket");
-
-const authRoutes     = require("./routes/auth");
-const clientRoutes   = require("./routes/clients");
-const botRoutes      = require("./routes/bots");
-const orderRoutes    = require("./routes/orders");
-const marketRoutes   = require("./routes/market");
-const holdingRoutes  = require("./routes/holdings");
-
-const app  = express();
+const db = require("./services/database");
+const scheduler = require("./jobs/scheduler");
+const wsServer = require("./services/websocket");
+const authRoutes = require("./routes/auth");
+const clientRoutes = require("./routes/clients");
+const botRoutes = require("./routes/bots");
+const orderRoutes = require("./routes/orders");
+const marketRoutes = require("./routes/market");
+const holdingRoutes = require("./routes/holdings");
+const app = express();
 const PORT = process.env.PORT || 4000;
-
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
 app.use((req, _res, next) => {
   const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   logger.info(`[${ist} IST] ${req.method} ${req.path}`);
   next();
 });
-
 app.get("/health", (_req, res) => {
   const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
   res.json({ status: "ok", time_ist: ist, version: "1.0.0" });
 });
-
-app.use("/api/auth",     authRoutes);
-app.use("/api/clients",  clientRoutes);
-app.use("/api/bots",     botRoutes);
-app.use("/api/orders",   orderRoutes);
-app.use("/api/market",   marketRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/clients", clientRoutes);
+app.use("/api/bots", botRoutes);
+app.use("/api/orders", orderRoutes);
+app.use("/api/market", marketRoutes);
 app.use("/api/holdings", holdingRoutes);
-
 app.use((_req, res) => res.status(404).json({ error: "Route not found" }));
-
 app.use((err, _req, res, _next) => {
   logger.error("Unhandled error:", err);
   res.status(500).json({ error: "Internal server error", message: err.message });
 });
-
 async function start() {
   try {
     await db.connect();
@@ -64,5 +55,4 @@ async function start() {
     process.exit(1);
   }
 }
-
 start();
