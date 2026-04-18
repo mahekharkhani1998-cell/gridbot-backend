@@ -3,11 +3,22 @@ const db         = require("../services/database");
 const auth       = require("../middleware/auth");
 const { encrypt, decrypt, mask } = require("../services/encryption");
 
-// GET /api/clients
+// GET /api/clients — returns clients with decrypted credentials
 router.get("/", auth, async (req, res) => {
   try {
-    const rows = await db.getAll("SELECT id,name,broker,segment,note,active,token_refreshed_at,created_at FROM clients ORDER BY created_at DESC");
-    res.json({ ok: true, clients: rows });
+    const rows = await db.getAll("SELECT id,name,broker,segment,note,active,credentials_enc,token_refreshed_at,created_at FROM clients ORDER BY created_at DESC");
+    const clients = rows.map(row => {
+      let credentials = {};
+      try { credentials = decrypt(row.credentials_enc); } catch(e) {}
+      return {
+        id: row.id, name: row.name, broker: row.broker, segment: row.segment,
+        note: row.note, active: row.active, credentials,
+        token_refreshed_at: row.token_refreshed_at, created_at: row.created_at,
+        bots: 0, pnl: 0,
+        added: row.created_at ? new Date(row.created_at).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata",day:"2-digit",month:"short",year:"numeric"}) : "",
+      };
+    });
+    res.json({ ok: true, clients });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
