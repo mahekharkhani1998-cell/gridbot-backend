@@ -4,54 +4,40 @@ const db         = require("../services/database");
 const { decrypt, encrypt } = require("../services/encryption");
 const { refreshDhanToken } = require("../services/dhan");
 const axios      = require("axios");
+const readline   = require("readline");
 
-// ─── All times in IST (UTC+5:30) ─────────────────────────────────────────────
-// Cron format: minute hour day month weekday
-// 8:00 AM IST  = 2:30 AM UTC  → cron "30 2 * * 1-5"
-// 6:00 AM IST  = 12:30 AM UTC → cron "30 0 * * 1-5"
+// ─── Cron times — IST converted to UTC for cron ───────────────────────────────
+// 8:00 AM IST  → 02:30 UTC → "30 2 * * 1-5"
+// 6:00 AM IST  → 00:30 UTC → "30 0 * * 1-5"
 
 function start() {
-
-  // ── 1. TOKEN REFRESH — 8:00 AM IST every weekday ─────────────────────────
+  // Token refresh — 8:00 AM IST weekdays
   cron.schedule("30 2 * * 1-5", async () => {
     const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
     logger.info(`[SCHEDULER] Token refresh started | IST: ${ist}`);
-
     try {
       const clients = await db.getAll("SELECT id, broker, credentials_enc FROM clients WHERE active=TRUE");
       for (const client of clients) {
         try {
           const creds = decrypt(client.credentials_enc);
-
-          // Only attempt if TOTP secret is present
           if (!creds.totp_secret) {
-            logger.warn(`Client ${client.id} (${client.broker}) has no TOTP secret — skipping auto-refresh`);
+            logger.warn(`Client ${client.id} (${client.broker}) has no TOTP secret — skipping`);
             continue;
           }
-
           let newToken = null;
-
-          // Broker-specific refresh logic
           if (client.broker === "Dhan") {
             newToken = await refreshDhanToken(creds.client_id, creds.totp_secret);
           } else {
-            // Generic TOTP-based brokers (Zerodha, Angel One, Upstox, Fyers etc.)
-            // Each broker has different login endpoint — add cases here as you onboard them
-            logger.info(`Broker ${client.broker} refresh not yet implemented — add in scheduler.js`);
+            logger.info(`Broker ${client.broker} refresh not yet implemented`);
             continue;
           }
-
           if (newToken) {
             creds.access_token = newToken;
-            const newEnc = encrypt(creds);
-            await db.query("UPDATE clients SET credentials_enc=$1, token_refreshed_at=NOW() WHERE id=$2", [newEnc, client.id]);
-            await db.query("INSERT INTO token_refresh_log (client_id, success, message) VALUES ($1, TRUE, $2)",
-              [client.id, `Token refreshed at ${ist} IST`]);
-            logger.info(`✓ Token refreshed for client ${client.id} at IST ${ist}`);
+            await db.query("UPDATE clients SET credentials_enc=$1, token_refreshed_at=NOW() WHERE id=$2", [encrypt(creds), client.id]);
+            await db.query("INSERT INTO token_refresh_log (client_id, success, message) VALUES ($1,TRUE,$2)", [client.id, `Refreshed at ${ist} IST`]);
+            logger.info(`✓ Token refreshed for client ${client.id}`);
           } else {
-            await db.query("INSERT INTO token_refresh_log (client_id, success, message) VALUES ($1, FALSE, $2)",
-              [client.id, `Token refresh FAILED at ${ist} IST`]);
-            logger.error(`✗ Token refresh FAILED for client ${client.id}`);
+            await db.query("INSERT INTO token_refresh_log (client_id, success, message) VALUES ($1,FALSE,$2)", [client.id, `FAILED at ${ist} IST`]);
           }
         } catch (err) {
           logger.error(`Token refresh error for client ${client.id}: ${err.message}`);
@@ -60,69 +46,125 @@ function start() {
     } catch (err) {
       logger.error(`Token refresh scheduler error: ${err.message}`);
     }
-  }, { timezone: "UTC" }); // cron runs in UTC, times above are pre-converted
+  }, { timezone: "UTC" });
 
-  // ── 2. SCRIPT MASTER REFRESH — 6:00 AM IST every weekday ─────────────────
+  // Script master refresh — 6:00 AM IST weekdays
   cron.schedule("30 0 * * 1-5", async () => {
     const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-    logger.info(`[SCHEDULER] Script master refresh started | IST: ${ist}`);
+    logger.info(`[SCHEDULER] Dhan script master refresh started | IST: ${ist}`);
     await refreshScriptMaster();
   }, { timezone: "UTC" });
 
-  logger.info("[SCHEDULER] Jobs registered: token-refresh@8:00AM IST, script-refresh@6:00AM IST (weekdays)");
+  logger.info("[SCHEDULER] Jobs registered: token-refresh@8:00AM IST, dhan-script-refresh@6:00AM IST (weekdays)");
 }
 
-// ─── Fetch NSE/BSE master CSV and upsert into script_master table ─────────────
-async function refreshScriptMaster() {
-  // NSE Equity master CSV
-  try {
-    const res = await axios.get(
-      "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
-      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 30000 }
-    );
-    const lines = res.data.split("\n").slice(1); // skip header
-    let count = 0;
-    for (const line of lines) {
-      const cols = line.split(",");
-      if (cols.length < 5) continue;
-      const name       = cols[1]?.trim();
-      const secId      = cols[4]?.trim(); // TOKEN / SECURITY_ID column
-      const isin       = cols[2]?.trim();
-      if (!name || !secId) continue;
-      await db.query(`INSERT INTO script_master (exchange, security_id, name, isin, updated_at)
-        VALUES ('NSE_EQ', $1, $2, $3, NOW())
-        ON CONFLICT (exchange, security_id) DO UPDATE SET name=$2, isin=$3, updated_at=NOW()`,
-        [secId, name, isin]);
-      count++;
-    }
-    logger.info(`✓ NSE_EQ script master updated: ${count} scripts | IST: ${new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}`);
-  } catch (err) {
-    logger.error(`NSE script master refresh failed: ${err.message}`);
-  }
+// ─── Dhan script master ──────────────────────────────────────────────────────
+// The compact CSV (~150k rows) lives at images.dhan.co. We stream-parse it so
+// memory stays bounded, batch-upsert in chunks of 1000.
+const DHAN_SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv";
+const BATCH_SIZE     = 1000;
 
-  // BSE Equity — BSE provides JSON API
+// Map Dhan's SEM_EXM_EXCH_ID + SEM_SEGMENT to our app's exchange-segment names.
+function mapSegment(exch, seg) {
+  const e = String(exch || "").toUpperCase();
+  const s = String(seg  || "").toUpperCase();
+  if (e === "NSE" && s === "E") return "NSE_EQ";
+  if (e === "BSE" && s === "E") return "BSE_EQ";
+  if (e === "NSE" && s === "D") return "NSE_FNO";
+  if (e === "BSE" && s === "D") return "BSE_FNO";
+  if (e === "NSE" && s === "C") return "NSE_CURRENCY";
+  if (e === "BSE" && s === "C") return "BSE_CURRENCY";
+  if (e === "MCX" && (s === "M" || s === "D")) return "MCX_COMM";
+  if (e === "NSE" && s === "I") return "IDX_I";
+  return null; // skip unknown segments
+}
+
+async function refreshScriptMaster() {
+  let total = 0, kept = 0, batch = [];
+  const colIdx = {}; // header → index
+
   try {
-    const res = await axios.get(
-      "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status=Active",
-      { headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://www.bseindia.com" }, timeout: 30000 }
-    );
-    const list = res.data || [];
-    let count  = 0;
-    for (const s of list) {
-      const name  = s.short_name || s.LONG_NAME;
-      const secId = String(s.SCRIP_CD || s.scripcode);
-      const isin  = s.ISIN_NUMBER || s.isinno || "";
-      if (!name || !secId) continue;
-      await db.query(`INSERT INTO script_master (exchange, security_id, name, isin, updated_at)
-        VALUES ('BSE_EQ', $1, $2, $3, NOW())
-        ON CONFLICT (exchange, security_id) DO UPDATE SET name=$2, isin=$3, updated_at=NOW()`,
-        [secId, name, isin]);
-      count++;
+    const res = await axios.get(DHAN_SCRIP_URL, {
+      responseType: "stream",
+      timeout: 120000,
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+
+    const rl = readline.createInterface({ input: res.data, crlfDelay: Infinity });
+
+    for await (const line of rl) {
+      total++;
+      if (total === 1) {
+        const headers = line.split(",").map(h => h.trim().toUpperCase());
+        headers.forEach((h, i) => { colIdx[h] = i; });
+        // Required columns
+        const req = ["SEM_SMST_SECURITY_ID", "SEM_TRADING_SYMBOL", "SEM_EXM_EXCH_ID", "SEM_SEGMENT"];
+        for (const r of req) {
+          if (!(r in colIdx)) {
+            logger.error(`Dhan CSV missing required column ${r}. Headers: ${headers.join("|")}`);
+            return;
+          }
+        }
+        continue;
+      }
+
+      // Compact CSV has no quoted fields with embedded commas for the columns we use.
+      const cols = line.split(",");
+      const secId   = (cols[colIdx.SEM_SMST_SECURITY_ID] || "").trim();
+      const exch    = (cols[colIdx.SEM_EXM_EXCH_ID]      || "").trim();
+      const seg     = (cols[colIdx.SEM_SEGMENT]          || "").trim();
+      const segment = mapSegment(exch, seg);
+      if (!secId || !segment) continue;
+
+      const tradingSym = (cols[colIdx.SEM_TRADING_SYMBOL] || "").trim();
+      const customSym  = colIdx.SEM_CUSTOM_SYMBOL !== undefined ? (cols[colIdx.SEM_CUSTOM_SYMBOL] || "").trim() : "";
+      const isin       = colIdx.SEM_ISIN !== undefined ? (cols[colIdx.SEM_ISIN] || "").trim() : "";
+      const lotSize    = colIdx.SEM_LOT_UNITS !== undefined ? parseInt(cols[colIdx.SEM_LOT_UNITS] || "1", 10) : 1;
+      const expiry     = colIdx.SEM_EXPIRY_DATE !== undefined ? (cols[colIdx.SEM_EXPIRY_DATE] || "").trim() : "";
+      const instrType  = colIdx.SEM_INSTRUMENT_NAME !== undefined ? (cols[colIdx.SEM_INSTRUMENT_NAME] || "").trim() : "";
+      const name       = customSym || tradingSym;
+      if (!name) continue;
+
+      batch.push([segment, secId, name, tradingSym, isin, Number.isFinite(lotSize) ? lotSize : 1, expiry, instrType]);
+      kept++;
+
+      if (batch.length >= BATCH_SIZE) {
+        await flushBatch(batch);
+        batch = [];
+      }
     }
-    logger.info(`✓ BSE_EQ script master updated: ${count} scripts | IST: ${new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}`);
+    if (batch.length) await flushBatch(batch);
+
+    const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+    logger.info(`✓ Dhan script master updated: ${kept} scripts kept of ${total - 1} CSV rows | IST: ${ist}`);
   } catch (err) {
-    logger.error(`BSE script master refresh failed: ${err.message}`);
+    logger.error(`Dhan script master refresh failed: ${err.message}`);
   }
+}
+
+async function flushBatch(batch) {
+  // Build a single INSERT ... VALUES ($1,$2,...),($n,...) ON CONFLICT DO UPDATE
+  const cols   = 8;
+  const params = [];
+  const tuples = batch.map((row, i) => {
+    const base = i * cols;
+    params.push(...row);
+    return `($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},NOW())`;
+  });
+  const sql = `
+    INSERT INTO script_master
+      (exchange, security_id, name, trading_symbol, isin, lot_size, expiry, instrument, updated_at)
+    VALUES ${tuples.join(",")}
+    ON CONFLICT (exchange, security_id) DO UPDATE SET
+      name           = EXCLUDED.name,
+      trading_symbol = EXCLUDED.trading_symbol,
+      isin           = EXCLUDED.isin,
+      lot_size       = EXCLUDED.lot_size,
+      expiry         = EXCLUDED.expiry,
+      instrument     = EXCLUDED.instrument,
+      updated_at     = NOW()
+  `;
+  await db.query(sql, params);
 }
 
 module.exports = { start, refreshScriptMaster };

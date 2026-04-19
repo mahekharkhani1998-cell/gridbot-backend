@@ -3,10 +3,34 @@ const db         = require("../services/database");
 const auth       = require("../middleware/auth");
 const { encrypt, decrypt, mask } = require("../services/encryption");
 
-// GET /api/clients — returns clients with decrypted credentials
+// GET /api/clients?page=1&limit=50&q=jigar — paginated list with optional search
 router.get("/", auth, async (req, res) => {
   try {
-    const rows = await db.getAll("SELECT id,name,broker,segment,note,active,credentials_enc,token_refreshed_at,created_at FROM clients ORDER BY created_at DESC");
+    const page  = Math.max(parseInt(req.query.page  || "1",  10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "50", 10) || 50, 1), 500);
+    const q     = (req.query.q || "").trim();
+    const offset = (page - 1) * limit;
+
+    let where = "";
+    const params = [];
+    if (q) {
+      params.push(`%${q.toUpperCase()}%`);
+      where = ` WHERE UPPER(name) LIKE $${params.length} OR UPPER(broker) LIKE $${params.length}`;
+    }
+
+    const countRow = await db.getOne(`SELECT COUNT(*)::int AS n FROM clients${where}`, params);
+    const total    = countRow?.n || 0;
+
+    params.push(limit);
+    params.push(offset);
+    const rows = await db.getAll(
+      `SELECT id,name,broker,segment,note,active,credentials_enc,token_refreshed_at,created_at
+       FROM clients${where}
+       ORDER BY created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
+
     const clients = rows.map(row => {
       let credentials = {};
       try { credentials = decrypt(row.credentials_enc); } catch(e) {}
@@ -18,7 +42,7 @@ router.get("/", auth, async (req, res) => {
         added: row.created_at ? new Date(row.created_at).toLocaleDateString("en-IN",{timeZone:"Asia/Kolkata",day:"2-digit",month:"short",year:"numeric"}) : "",
       };
     });
-    res.json({ ok: true, clients });
+    res.json({ ok: true, clients, total, page, limit, pages: Math.ceil(total / limit) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

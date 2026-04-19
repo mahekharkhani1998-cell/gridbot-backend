@@ -44,6 +44,16 @@ async function start() {
     logger.info("✓ Database migrated");
     scheduler.start();
     logger.info("✓ Scheduler started");
+    // First-boot: if script_master is empty, kick off a refresh now (don't wait for 6 AM cron)
+    try {
+      const row = await db.getOne("SELECT COUNT(*)::int AS n FROM script_master");
+      if (!row || row.n === 0) {
+        logger.info("[BOOT] script_master is empty — triggering Dhan refresh in background");
+        scheduler.refreshScriptMaster(); // fire-and-forget
+      } else {
+        logger.info(`[BOOT] script_master has ${row.n} rows — skipping first-boot refresh`);
+      }
+    } catch (e) { logger.warn(`First-boot script check failed: ${e.message}`); }
     const server = app.listen(PORT, () => {
       const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
       logger.info(`✓ GridBot backend running on port ${PORT} | IST: ${ist}`);

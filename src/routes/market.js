@@ -3,40 +3,74 @@ const db     = require("../services/database");
 const auth   = require("../middleware/auth");
 const { refreshScriptMaster } = require("../jobs/scheduler");
 
-// GET /api/market/scripts?exchange=NSE_EQ&q=BSE
-// Returns scripts from DB (populated daily from NSE/BSE master CSV)
+// GET /api/market/scripts?exchange=NSE_EQ&q=RELIA&limit=50
+// Searches both trading_symbol and name (case-insensitive). security_id matches as a prefix.
 router.get("/scripts", auth, async (req, res) => {
   try {
     const { exchange, q } = req.query;
+    const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
     if (!exchange) return res.status(400).json({ error: "exchange required" });
-    let sql  = "SELECT * FROM script_master WHERE exchange=$1";
-    const params = [exchange];
-    if (q) {
-      params.push(`%${q.toUpperCase()}%`);
-      sql += ` AND (UPPER(name) LIKE $2 OR security_id LIKE $2)`;
+
+    let sql, params;
+    if (q && q.trim()) {
+      const term = q.trim().toUpperCase();
+      sql = `
+        SELECT exchange, security_id, name, trading_symbol, isin, lot_size, expiry, instrument
+        FROM script_master
+        WHERE exchange = $1
+          AND (
+            UPPER(trading_symbol) LIKE $2 OR
+            UPPER(name)           LIKE $2 OR
+            security_id           LIKE $3
+          )
+        ORDER BY
+          CASE WHEN UPPER(trading_symbol) = $4 THEN 0
+               WHEN UPPER(trading_symbol) LIKE $5 THEN 1
+               ELSE 2 END,
+          name
+        LIMIT $6`;
+      params = [exchange, `%${term}%`, `${term}%`, term, `${term}%`, limit];
+    } else {
+      sql = `
+        SELECT exchange, security_id, name, trading_symbol, isin, lot_size, expiry, instrument
+        FROM script_master
+        WHERE exchange = $1
+        ORDER BY name
+        LIMIT $2`;
+      params = [exchange, limit];
     }
-    sql += " ORDER BY name LIMIT 50";
+
     const rows = await db.getAll(sql, params);
     res.json({ ok: true, scripts: rows, total: rows.length, exchange });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// POST /api/market/refresh  — manually trigger script master refresh
-router.post("/refresh", auth, async (req, res) => {
+// GET /api/market/scripts/count — useful for the UI footer
+router.get("/scripts/count", auth, async (_req, res) => {
   try {
-    res.json({ ok: true, message: "Script master refresh started in background" });
-    refreshScriptMaster(); // runs async, don't await
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const rows = await db.getAll(`
+      SELECT exchange, COUNT(*)::int AS n, MAX(updated_at) AS updated_at
+      FROM script_master GROUP BY exchange ORDER BY exchange`);
+    res.json({ ok: true, counts: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// GET /api/market/expiries  — dynamic expiries based on exchange type
+// POST /api/market/refresh — manually trigger script master refresh
+router.post("/refresh", auth, async (_req, res) => {
+  res.json({ ok: true, message: "Dhan script master refresh started in background" });
+  refreshScriptMaster(); // fire-and-forget
+});
+
+// GET /api/market/expiries — dynamic expiries by exchange
 router.get("/expiries", auth, async (req, res) => {
   const { exchange } = req.query;
-  // NSE_EQ and BSE_EQ have NO expiry
   if (exchange === "NSE_EQ" || exchange === "BSE_EQ") {
     return res.json({ ok: true, expiries: [], hasExpiry: false });
   }
-  // FNO, Currency, Commodity — return next 6 monthly expiries (3rd Thursday)
   const expiries = [];
   const now = new Date();
   for (let m = 0; m < 6; m++) {
@@ -47,14 +81,13 @@ router.get("/expiries", auth, async (req, res) => {
       if (dt.getMonth() !== d.getMonth()) break;
       if (dt.getDay() === 4) thursdays.push(dt);
     }
-    const exp = thursdays[2]; // 3rd Thursday
+    const exp = thursdays[2];
     if (exp) {
       expiries.push(exp.toLocaleDateString("en-IN", {
         day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Kolkata",
       }));
     }
   }
-  // Add weekly expiries (next 8 Thursdays) for FNO
   if (exchange === "NSE_FNO") {
     const weekly = [];
     for (let w = 0; w < 8; w++) {
@@ -65,8 +98,7 @@ router.get("/expiries", auth, async (req, res) => {
         day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Kolkata",
       }));
     }
-    const all = [...new Set([...weekly, ...expiries])].sort();
-    return res.json({ ok: true, expiries: all, hasExpiry: true });
+    return res.json({ ok: true, expiries: [...new Set([...weekly, ...expiries])].sort(), hasExpiry: true });
   }
   res.json({ ok: true, expiries, hasExpiry: true });
 });

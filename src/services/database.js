@@ -85,12 +85,20 @@ const MIGRATIONS = `
     exchange        TEXT NOT NULL,
     security_id     TEXT NOT NULL,
     name            TEXT NOT NULL,
+    trading_symbol  TEXT,
     isin            TEXT,
     sector          TEXT,
     lot_size        INTEGER DEFAULT 1,
+    expiry          TEXT,
+    instrument      TEXT,
     updated_at      TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (exchange, security_id)
   );
+
+  -- Add columns for installations created before the schema change
+  ALTER TABLE script_master ADD COLUMN IF NOT EXISTS trading_symbol TEXT;
+  ALTER TABLE script_master ADD COLUMN IF NOT EXISTS expiry         TEXT;
+  ALTER TABLE script_master ADD COLUMN IF NOT EXISTS instrument     TEXT;
 
   CREATE TABLE IF NOT EXISTS token_refresh_log (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -105,7 +113,9 @@ const MIGRATIONS = `
   CREATE INDEX IF NOT EXISTS idx_orders_status    ON orders(status);
   CREATE INDEX IF NOT EXISTS idx_bots_client_id   ON bots(client_id);
   CREATE INDEX IF NOT EXISTS idx_bots_status      ON bots(status);
-  CREATE INDEX IF NOT EXISTS idx_script_name      ON script_master(name);
+  CREATE INDEX IF NOT EXISTS idx_script_name        ON script_master(name);
+  CREATE INDEX IF NOT EXISTS idx_script_tradingsym  ON script_master(trading_symbol);
+  CREATE INDEX IF NOT EXISTS idx_script_exch_name   ON script_master(exchange, name);
 `;
 
 async function connect() {
