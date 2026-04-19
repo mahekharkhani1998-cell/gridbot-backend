@@ -108,6 +108,17 @@ const MIGRATIONS = `
     refreshed_at TIMESTAMPTZ DEFAULT NOW()
   );
 
+  CREATE TABLE IF NOT EXISTS app_logs (
+    id            BIGSERIAL PRIMARY KEY,
+    level         TEXT NOT NULL,
+    message       TEXT NOT NULL,
+    ist_timestamp TEXT,
+    meta          JSONB,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_app_logs_created  ON app_logs(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_app_logs_level    ON app_logs(level);
+
   CREATE INDEX IF NOT EXISTS idx_orders_bot_id    ON orders(bot_id);
   CREATE INDEX IF NOT EXISTS idx_orders_client_id ON orders(client_id);
   CREATE INDEX IF NOT EXISTS idx_orders_status    ON orders(status);

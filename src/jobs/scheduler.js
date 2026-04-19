@@ -55,7 +55,17 @@ function start() {
     await refreshScriptMaster();
   }, { timezone: "UTC" });
 
-  logger.info("[SCHEDULER] Jobs registered: token-refresh@8:00AM IST, dhan-script-refresh@6:00AM IST (weekdays)");
+  // App logs cleanup — 3:00 AM IST every day. Keep 7 days.
+  cron.schedule("30 21 * * *", async () => {
+    try {
+      const r = await db.query("DELETE FROM app_logs WHERE created_at < NOW() - INTERVAL '7 days'");
+      logger.info(`[SCHEDULER] app_logs cleanup: deleted ${r.rowCount || 0} old rows`);
+    } catch (err) {
+      logger.error(`app_logs cleanup error: ${err.message}`);
+    }
+  }, { timezone: "UTC" });
+
+  logger.info("[SCHEDULER] Jobs registered: token-refresh@8:00AM IST, dhan-script-refresh@6:00AM IST (weekdays), logs-cleanup@3:00AM IST (daily)");
 }
 
 // ─── Dhan script master ──────────────────────────────────────────────────────
