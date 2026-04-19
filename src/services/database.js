@@ -119,6 +119,20 @@ const MIGRATIONS = `
   CREATE INDEX IF NOT EXISTS idx_app_logs_created  ON app_logs(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_app_logs_level    ON app_logs(level);
 
+  CREATE TABLE IF NOT EXISTS client_buckets (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+  );
+
+  CREATE TABLE IF NOT EXISTS bucket_members (
+    bucket_id  UUID REFERENCES client_buckets(id) ON DELETE CASCADE,
+    client_id  UUID REFERENCES clients(id)        ON DELETE CASCADE,
+    PRIMARY KEY (bucket_id, client_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_bucket_members_client ON bucket_members(client_id);
+
   CREATE INDEX IF NOT EXISTS idx_orders_bot_id    ON orders(bot_id);
   CREATE INDEX IF NOT EXISTS idx_orders_client_id ON orders(client_id);
   CREATE INDEX IF NOT EXISTS idx_orders_status    ON orders(status);

@@ -12,6 +12,8 @@ const orderRoutes = require("./routes/orders");
 const marketRoutes = require("./routes/market");
 const holdingRoutes = require("./routes/holdings");
 const logRoutes = require("./routes/logs");
+const bucketRoutes = require("./routes/buckets");
+const tradeRoutes = require("./routes/trade");
 const app = express();
 const PORT = process.env.PORT || 4000;
 app.use(cors({ origin: true, credentials: true }));
@@ -33,6 +35,8 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/market", marketRoutes);
 app.use("/api/holdings", holdingRoutes);
 app.use("/api/logs", logRoutes);
+app.use("/api/buckets", bucketRoutes);
+app.use("/api/trade", tradeRoutes);
 app.use((_req, res) => res.status(404).json({ error: "Route not found" }));
 app.use((err, _req, res, _next) => {
   logger.error("Unhandled error:", err);
