@@ -51,9 +51,12 @@ class DhanAPI {
       });
       const orderId = res.data?.orderId || res.data?.data?.orderId || null;
       logger.info(`Market ${side} sent | qty:${qty} | orderId:${orderId}`);
+      this.lastError = orderId ? null : "No order ID returned by Dhan";
       return orderId;
     } catch (err) {
-      logger.error(`Market order error: ${err.response?.data?.errorMessage || err.message}`);
+      const msg = err.response?.data?.errorMessage || err.response?.data?.message || err.message;
+      logger.error(`Market order error: ${msg}`);
+      this.lastError = msg;
       return null;
     }
   }
@@ -67,9 +70,12 @@ class DhanAPI {
       });
       const orderId = res.data?.orderId || res.data?.data?.orderId || null;
       logger.info(`Limit ${side} @ ₹${price} | qty:${qty} | orderId:${orderId}`);
+      this.lastError = orderId ? null : "No order ID returned by Dhan";
       return orderId;
     } catch (err) {
-      logger.error(`Limit order error: ${err.response?.data?.errorMessage || err.message}`);
+      const msg = err.response?.data?.errorMessage || err.response?.data?.message || err.message;
+      logger.error(`Limit order error: ${msg}`);
+      this.lastError = msg;
       return null;
     }
   }

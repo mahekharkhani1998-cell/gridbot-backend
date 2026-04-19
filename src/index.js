@@ -44,14 +44,23 @@ async function start() {
     logger.info("✓ Database migrated");
     scheduler.start();
     logger.info("✓ Scheduler started");
-    // First-boot: if script_master is empty, kick off a refresh now (don't wait for 6 AM cron)
+    // First-boot: refresh script master if empty, sparse, or stale
     try {
-      const row = await db.getOne("SELECT COUNT(*)::int AS n FROM script_master");
-      if (!row || row.n === 0) {
-        logger.info("[BOOT] script_master is empty — triggering Dhan refresh in background");
-        scheduler.refreshScriptMaster(); // fire-and-forget
+      const row = await db.getOne(`
+        SELECT COUNT(*)::int AS n,
+               EXTRACT(EPOCH FROM (NOW() - COALESCE(MAX(updated_at), '1970-01-01'::timestamptz)))::bigint AS age_sec
+        FROM script_master
+      `);
+      const n   = row?.n || 0;
+      const age = row?.age_sec || Infinity;
+      const STALE_HOURS = 36;
+      const MIN_ROWS    = 50000;
+      if (n === 0 || n < MIN_ROWS || age > STALE_HOURS * 3600) {
+        const reason = n === 0 ? "empty" : n < MIN_ROWS ? `only ${n} rows (expected 150k+)` : `${Math.round(age/3600)}h stale`;
+        logger.info(`[BOOT] script_master is ${reason} — triggering Dhan refresh in background`);
+        scheduler.refreshScriptMaster();
       } else {
-        logger.info(`[BOOT] script_master has ${row.n} rows — skipping first-boot refresh`);
+        logger.info(`[BOOT] script_master has ${n} rows, ${Math.round(age/3600)}h old — fresh enough`);
       }
     } catch (e) { logger.warn(`First-boot script check failed: ${e.message}`); }
     const server = app.listen(PORT, () => {

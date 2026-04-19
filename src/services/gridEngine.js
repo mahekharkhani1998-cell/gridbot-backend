@@ -34,6 +34,14 @@ async function startBot(botId) {
     return { ok: false, message: "Bot already running" };
   }
 
+  // Pre-check: don't even try if market is closed — Dhan will reject anyway
+  if (!isMarketOpen()) {
+    return {
+      ok: false,
+      message: `Market is closed (NSE/BSE: Mon–Fri 09:15–15:30 IST). Current IST: ${istNow()}`,
+    };
+  }
+
   const bot = await db.getOne("SELECT b.*, c.credentials_enc, c.broker FROM bots b JOIN clients c ON b.client_id=c.id WHERE b.id=$1", [botId]);
   if (!bot) return { ok: false, message: "Bot not found" };
 
@@ -47,7 +55,7 @@ async function startBot(botId) {
   // Check existing holdings (CNC)
   const holdings = await api.getHoldings();
   const holding  = holdings.find(h => String(h.securityId) === String(bot.security_id));
-  let positionQty  = holding ? parseInt(holding.availableQty || holding.totalQty || 0) : 0;
+  let positionQty   = holding ? parseInt(holding.availableQty || holding.totalQty || 0) : 0;
   let lastFillPrice = holding ? parseFloat(holding.avgCostPrice || holding.averagePrice || 0) : 0;
 
   if (positionQty > 0) {
@@ -59,11 +67,16 @@ async function startBot(botId) {
       securityId: bot.security_id, exchangeSegment: bot.exchange,
       side: "BUY", qty: bot.trade_qty, productType: bot.product,
     });
-    if (!orderId) { logger.error("Initial buy failed"); return { ok: false, message: "Initial buy failed" }; }
+    if (!orderId) {
+      const reason = api.lastError || "Unknown error from Dhan";
+      logger.error(`Initial buy failed: ${reason}`);
+      return { ok: false, message: `Initial buy failed: ${reason}` };
+    }
 
     await saveOrder(botId, bot.client_id, bot, orderId, "BUY", "MARKET", bot.trade_qty, 0);
 
     // Wait for fill
+    let filled = false;
     for (let i = 0; i < 30; i++) {
       await sleep(2000);
       const { status, fillPrice } = await api.getStatusSmart(orderId);
@@ -73,18 +86,25 @@ async function startBot(botId) {
         positionQty   = bot.trade_qty;
         await db.query("UPDATE orders SET status='FILLED', fill_price=$1, filled_at=NOW() WHERE broker_order_id=$2", [fillPrice, orderId]);
         logger.info(`BUY filled @ ₹${fillPrice} | IST: ${istNow()}`);
+        filled = true;
         break;
       }
       if (status === "CANCELLED" || status === "REJECTED") {
         logger.error(`Initial buy ${status}`);
-        return { ok: false, message: `Initial buy ${status}` };
+        return { ok: false, message: `Initial buy ${status} by exchange` };
       }
+    }
+    if (!filled) {
+      return { ok: false, message: "Initial buy did not fill within 60s — try again or check broker" };
     }
   }
 
   // Place first grid pair
   const pair = await placeGridPair(api, bot, lastFillPrice, positionQty);
-  if (!pair.ok) return { ok: false, message: "Grid placement failed" };
+  if (!pair.ok) {
+    const reason = api.lastError || "Unknown grid placement error";
+    return { ok: false, message: `Grid placement failed: ${reason}` };
+  }
 
   // Update bot state in DB
   await db.query(`UPDATE bots SET status='RUNNING', position_qty=$1, last_fill_price=$2,
