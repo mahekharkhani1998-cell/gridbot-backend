@@ -24,17 +24,23 @@ function start() {
             logger.warn(`Client ${client.id} (${client.broker}) has no TOTP secret — skipping`);
             continue;
           }
-          let newToken = null;
+          if (!creds.pin) {
+            logger.warn(`Client ${client.id} (${client.broker}) has no PIN — skipping (Dhan v2 requires PIN)`);
+            await db.query("INSERT INTO token_refresh_log (client_id, success, message) VALUES ($1,FALSE,$2)", [client.id, `SKIPPED — missing pin in credentials`]);
+            continue;
+          }
+          let refreshed = null;
           if (client.broker === "Dhan") {
-            newToken = await refreshDhanToken(creds.client_id, creds.totp_secret);
+            refreshed = await refreshDhanToken(creds.client_id, creds.totp_secret, creds.pin);
           } else {
             logger.info(`Broker ${client.broker} refresh not yet implemented`);
             continue;
           }
-          if (newToken) {
-            creds.access_token = newToken;
+          if (refreshed && refreshed.accessToken) {
+            creds.access_token = refreshed.accessToken;
+            creds.expiry_time  = refreshed.expiryTime;  // ISO string from Dhan, used for expiry checks
             await db.query("UPDATE clients SET credentials_enc=$1, token_refreshed_at=NOW() WHERE id=$2", [encrypt(creds), client.id]);
-            await db.query("INSERT INTO token_refresh_log (client_id, success, message) VALUES ($1,TRUE,$2)", [client.id, `Refreshed at ${ist} IST`]);
+            await db.query("INSERT INTO token_refresh_log (client_id, success, message) VALUES ($1,TRUE,$2)", [client.id, `Refreshed at ${ist} IST, expires ${refreshed.expiryTime}`]);
             logger.info(`✓ Token refreshed for client ${client.id}`);
           } else {
             await db.query("INSERT INTO token_refresh_log (client_id, success, message) VALUES ($1,FALSE,$2)", [client.id, `FAILED at ${ist} IST`]);
