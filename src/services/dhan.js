@@ -2,6 +2,7 @@ const axios  = require("axios");
 const { logger } = require("./logger");
 
 const BASE_URL = "https://api.dhan.co";
+const AUTH_URL = "https://auth.dhan.co";
 
 // All Dhan v2 endpoints. v1 is deprecated and returns 404 / empty arrays for
 // many accounts as of late 2025.
@@ -13,7 +14,13 @@ const EP = {
   OHLC:     "/v2/marketfeed/ohlc",
   INTRA:    "/v2/charts/intraday",
   HIST:     "/v2/charts/historical",
-  TOKEN:    "/v2/token/generate",
+  PROFILE:  "/v2/profile",
+  RENEW:    "/v2/RenewToken",
+};
+
+// Auth endpoints live on a different host (auth.dhan.co, not api.dhan.co)
+const AUTH_EP = {
+  GENERATE: "/app/generateAccessToken",
 };
 
 const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
@@ -323,23 +330,77 @@ class DhanAPI {
       return [];
     }
   }
+
+  // Quick health check — if this returns 200 the access token is still valid.
+  async checkProfile() {
+    try {
+      const res = await this.http.get(EP.PROFILE);
+      return { ok: true, data: DhanAPI.unwrap(res) };
+    } catch (err) {
+      const status = err.response?.status;
+      return { ok: false, status, message: err.response?.data?.errorMessage || err.message };
+    }
+  }
 }
 
 // ─── TOTP-based token refresh ────────────────────────────────────────────────
-async function refreshDhanToken(clientId, totpSecret) {
+//
+// Corrected version. Previous code called POST api.dhan.co/v2/token/generate
+// with body { clientId, authCode } — that endpoint does not exist. The real
+// endpoint (per Dhan v2 docs) is:
+//
+//   POST https://auth.dhan.co/app/generateAccessToken
+//        ?dhanClientId={id}&pin={pin}&totp={totp}
+//
+// It requires the 6-digit Dhan PIN in addition to the TOTP. Returns a JWT
+// valid for 24 hours plus an ISO expiryTime.
+//
+// Returns: { accessToken, expiryTime, clientName, clientUcc, ddpi } on success,
+//          null on failure (error already logged).
+async function refreshDhanToken(clientId, totpSecret, pin) {
   const OTPAuth = require("otpauth");
-  try {
-    const totp = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(totpSecret), digits: 6, period: 30 });
-    const otp  = totp.generate();
-    const ist  = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-    logger.info(`TOTP generated for client ${clientId}: ${otp} (IST: ${ist})`);
-    const res = await axios.post(`${BASE_URL}${EP.TOKEN}`, { clientId, authCode: otp });
-    const newToken = res.data?.accessToken || res.data?.data?.accessToken;
-    if (newToken) { logger.info(`Token refreshed for client ${clientId} at IST ${ist}`); return newToken; }
-    logger.warn(`Token refresh returned no token for client ${clientId}`);
+  if (!clientId || !totpSecret || !pin) {
+    logger.error(`refreshDhanToken: missing required input (clientId=${!!clientId} totpSecret=${!!totpSecret} pin=${!!pin})`);
     return null;
+  }
+  try {
+    const totp = new OTPAuth.TOTP({
+      secret: OTPAuth.Secret.fromBase32(totpSecret),
+      digits: 6,
+      period: 30,
+    });
+    const otp = totp.generate();
+    const ist = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+    logger.info(`TOTP generated for client ${clientId} (IST: ${ist})`);
+
+    const res = await axios.post(
+      `${AUTH_URL}${AUTH_EP.GENERATE}`,
+      null,
+      {
+        params: { dhanClientId: clientId, pin, totp: otp },
+        timeout: 15000,
+      }
+    );
+
+    const newToken  = res.data?.accessToken;
+    const expiryStr = res.data?.expiryTime; // e.g. "2026-04-21T12:37:23" — IST, no tz suffix
+    if (!newToken) {
+      logger.warn(`Token refresh returned no token for client ${clientId}: ${JSON.stringify(res.data)}`);
+      return null;
+    }
+    logger.info(`Token refreshed for client ${clientId} at IST ${ist}, expires ${expiryStr}`);
+    return {
+      accessToken: newToken,
+      expiryTime:  expiryStr, // caller stores this; we append +05:30 when parsing
+      clientName:  res.data?.dhanClientName || null,
+      clientUcc:   res.data?.dhanClientUcc  || null,
+      ddpi:        res.data?.givenPowerOfAttorney ?? null,
+    };
   } catch (err) {
-    logger.error(`Token refresh failed for client ${clientId}: ${err.response?.data?.errorMessage || err.message}`);
+    const detail = err.response
+      ? `${err.response.status} ${JSON.stringify(err.response.data)}`
+      : err.message;
+    logger.error(`Token refresh failed for client ${clientId}: ${detail}`);
     return null;
   }
 }
