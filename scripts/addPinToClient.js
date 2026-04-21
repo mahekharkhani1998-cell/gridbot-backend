@@ -13,6 +13,7 @@
 // Then it fetches the client's credentials_enc blob, decrypts, merges the PIN,
 // re-encrypts, and writes it back. No other fields are touched.
 
+require("dotenv").config();
 const readline = require("readline");
 const db = require("../src/services/database");
 const { encrypt, decrypt, mask } = require("../src/services/encryption");
