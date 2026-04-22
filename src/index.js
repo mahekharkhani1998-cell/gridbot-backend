@@ -75,6 +75,8 @@ async function start() {
     });
     wsServer.attach(server);
     logger.info("✓ WebSocket server attached");
+    await require("./services/gridEngine").resumeBotsOnStartup();
+    logger.info("✓ Grid engine resumed bots");
   } catch (err) {
     logger.error("Failed to start server:", err);
     process.exit(1);
