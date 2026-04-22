@@ -59,6 +59,11 @@ const MIGRATIONS = `
     updated_at      TIMESTAMPTZ DEFAULT NOW()
   );
 
+  -- Phase A grid engine: additive columns for flat-state tracking and avg-cost
+  ALTER TABLE bots ADD COLUMN IF NOT EXISTS avg_buy_price   NUMERIC;
+  ALTER TABLE bots ADD COLUMN IF NOT EXISTS flat_peak_price NUMERIC;
+  ALTER TABLE bots ADD COLUMN IF NOT EXISTS flat_since_ts   TIMESTAMPTZ;
+
   CREATE TABLE IF NOT EXISTS orders (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     bot_id          UUID REFERENCES bots(id) ON DELETE CASCADE,
