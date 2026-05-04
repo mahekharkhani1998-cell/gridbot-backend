@@ -370,17 +370,49 @@ async function isPartial(api, orderId) {
 async function reconcileBot(botId, api) {
   const state = await db.getOne("SELECT * FROM bots WHERE id=$1", [botId]);
   if (!state || !["RUNNING","WAITING_FLAT","PAUSED"].includes(state.status)) return;
-  const holdings = await api.getHoldings();
+
+  // Fetch BOTH holdings (settled + T1 shares from prior days) AND positions (today's intraday net)
+  // because today's bot-bought shares appear in positions, NOT holdings (T+1 settlement).
+  let holdings, positions;
+  try {
+    [holdings, positions] = await Promise.all([api.getHoldings(), api.getPositions()]);
+  } catch (e) {
+    logger.warn(`RECONCILE ${state.ticker}: API fetch failed (${e.message}) — skipping reconcile this cycle`);
+    return;
+  }
+
   const h = holdings.find(x => String(x.securityId) === String(state.security_id));
-  const dhanQty = h ? parseInt(h.availableQty || h.totalQty || 0) : 0;
+  const p = positions.find(x => String(x.securityId) === String(state.security_id));
+
+  // Holdings: use totalQty (settled + T1), NOT availableQty (which excludes T1 shares we own but cannot sell yet)
+  const holdingQty = h ? parseInt(h.totalQty || 0) : 0;
+  const holdingAvg = h ? parseFloat(h.avgCostPrice || 0) : 0;
+
+  // Positions: netQty is signed. For a long-only grid bot, this should always be >= 0.
+  const positionNetQty = p ? parseInt(p.netQty || 0) : 0;
+  const positionAvg    = p ? parseFloat(p.buyAvg || 0) : 0;
+
+  if (positionNetQty < 0) {
+    logger.warn(`RECONCILE ${state.ticker}: Dhan position is short (netQty=${positionNetQty}) — unexpected for grid bot. Skipping reconcile.`);
+    return;
+  }
+
+  const dhanQty = holdingQty + positionNetQty;
   const botQty  = parseInt(state.position_qty || 0);
+
+  // Weighted average across both sources, falling back to existing avg if no shares
+  const dhanAvg = dhanQty > 0
+    ? ((holdingAvg * holdingQty) + (positionAvg * positionNetQty)) / dhanQty
+    : parseFloat(state.avg_buy_price || 0);
+
   if (dhanQty !== botQty) {
-    logger.warn(`RECONCILE ${state.ticker}: Dhan=${dhanQty} Bot=${botQty} — adopting Dhan as truth`);
-    await db.query("UPDATE bots SET position_qty=$1, avg_buy_price=$2, updated_at=NOW() WHERE id=$3",
-      [dhanQty, h ? parseFloat(h.avgCostPrice || state.avg_buy_price) : state.avg_buy_price, botId]);
+    logger.warn(`RECONCILE ${state.ticker}: Dhan=${dhanQty} (holdings=${holdingQty} + intraday=${positionNetQty}) Bot=${botQty} — adopting Dhan as truth, avg=₹${dhanAvg.toFixed(2)}`);
+    await db.query(
+      "UPDATE bots SET position_qty=$1, avg_buy_price=$2, updated_at=NOW() WHERE id=$3",
+      [dhanQty, dhanAvg, botId]
+    );
   }
 }
-
 // ─── EOD: cancel grid, keep shares, bot status → IDLE ─────────────────────────
 async function cancelGridHoldShares(botId, api) {
   const state = await db.getOne("SELECT * FROM bots WHERE id=$1", [botId]);
