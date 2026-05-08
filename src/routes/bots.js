@@ -1,7 +1,7 @@
 const router  = require("express").Router();
 const db      = require("../services/database");
 const auth    = require("../middleware/auth");
-const { startBot, stopBot, killAllBots } = require("../services/gridEngine");
+const { startBot, stopBot, killBot, killAllBots } = require("../services/gridEngine");
 
 // GET /api/bots
 router.get("/", auth, async (req, res) => {
@@ -65,15 +65,15 @@ router.post("/kill-all", auth, async (req, res) => {
 // POST /api/bots/:id/kill
 router.post("/:id/kill", auth, async (req, res) => {
   try {
-    await stopBot(req.params.id);
-    res.json({ ok: true, message: "Bot killed. Positions squared off." });
+    await killBot(req.params.id);
+    res.json({ ok: true, message: "Bot killed. Pending orders cancelled. Existing positions held in Demat." });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // DELETE /api/bots/:id
 router.delete("/:id", auth, async (req, res) => {
   try {
-    await stopBot(req.params.id);
+    await killBot(req.params.id);
     await db.query("DELETE FROM bots WHERE id=$1", [req.params.id]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
